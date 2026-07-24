@@ -3,6 +3,11 @@ import { Conversation } from '@shared/types';
 import { supabase } from '@/lib/supabase';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useParams } from '@tanstack/react-router';
+import {
+  getLocalConversation,
+  isLocalMode,
+  saveLocalConversation,
+} from '@/lib/localMode';
 
 const defaultConversation: Conversation = {
   id: '',
@@ -35,6 +40,11 @@ export function useConversation() {
         if (!user?.id) {
           throw new Error('User must be authenticated');
         }
+        if (isLocalMode) {
+          const local = getLocalConversation(conversationId);
+          if (!local) throw new Error('Conversation not found');
+          return local;
+        }
 
         const { data, error } = await supabase
           .from('conversations')
@@ -55,6 +65,7 @@ export function useConversation() {
   const { mutate: updateConversation, mutateAsync: updateConversationAsync } =
     useMutation({
       mutationFn: async (conversation: Conversation) => {
+        if (isLocalMode) return saveLocalConversation(conversation);
         const { data, error } = await supabase
           .from('conversations')
           .update(conversation)

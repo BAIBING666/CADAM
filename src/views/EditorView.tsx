@@ -25,6 +25,12 @@ import {
 import parseParameters from '@shared/parseParameters';
 import { normalizeModelId } from '@shared/models';
 import { supabase } from '@/lib/supabase';
+import {
+  getLocalConversation,
+  isLocalMode,
+  saveLocalMessage,
+  updateLocalConversation,
+} from '@/lib/localMode';
 import { updateParameter } from '@/lib/utils';
 import {
   persistAssistantParts,
@@ -75,6 +81,11 @@ export default function EditorView() {
     enabled: !!conversationId,
     queryFn: async () => {
       if (!conversationId) throw new Error('Conversation ID is required');
+      if (isLocalMode) {
+        const local = getLocalConversation(conversationId);
+        if (!local) throw new Error('Conversation not found');
+        return local;
+      }
       const { data, error } = await supabase
         .from('conversations')
         .select('*')
@@ -90,6 +101,9 @@ export default function EditorView() {
   const { mutate: updateConversation, mutateAsync: updateConversationAsync } =
     useMutation({
       mutationFn: async (conversation: Conversation) => {
+        if (isLocalMode) {
+          return updateLocalConversation(conversation.id, conversation);
+        }
         const { data, error } = await supabase
           .from('conversations')
           .update(conversation)
@@ -194,7 +208,7 @@ function ConversationEditor() {
       ? normalizeModelId(conversation.settings.model)
       : conversation.type === 'creative'
         ? 'quality'
-        : 'openai/gpt-5.6-sol',
+        : 'z-ai/glm-5.2',
   );
   const [activePreview, setActivePreview] = useState<ActivePreview>(null);
   const [parameters, setParameters] = useState<Parameter[]>([]);
@@ -267,11 +281,13 @@ function ConversationEditor() {
   const handleSendParts = useCallback(
     async (parts: AppUIMessage['parts']) => {
       if (!user?.id) throw new Error('User must be authenticated');
-      await ensureInputRecords({
-        parts,
-        conversationId: conversation.id,
-        userId: user.id,
-      });
+      if (!isLocalMode) {
+        await ensureInputRecords({
+          parts,
+          conversationId: conversation.id,
+          userId: user.id,
+        });
+      }
       const parentMessageId = conversation.current_message_leaf_id ?? null;
       const userMessageId = await persistUserMessage({
         conversationId: conversation.id,
@@ -307,11 +323,13 @@ function ConversationEditor() {
   const handleEdit = useCallback(
     async (original: ChatMessage, parts: AppUIMessage['parts']) => {
       if (!user?.id) throw new Error('User must be authenticated');
-      await ensureInputRecords({
-        parts,
-        conversationId: conversation.id,
-        userId: user.id,
-      });
+      if (!isLocalMode) {
+        await ensureInputRecords({
+          parts,
+          conversationId: conversation.id,
+          userId: user.id,
+        });
+      }
       const parentId = original.parent_message_id;
       const newUserMessageId = await persistUserMessage({
         conversationId: conversation.id,
@@ -340,16 +358,29 @@ function ConversationEditor() {
       // 'assistant'); the broader `'system'` slot on UIMessage is
       // never legitimate to copy.
       const role: Message['role'] = 'assistant';
-      const { error } = await supabase.from('messages').insert({
-        id: newId,
-        conversation_id: conversation.id,
-        role,
-        parts,
-        metadata,
-        parent_message_id: assistant.parent_message_id,
-        rating: 0,
-      });
-      if (error) throw error;
+      if (isLocalMode) {
+        saveLocalMessage(conversation.id, {
+          id: newId,
+          conversation_id: conversation.id,
+          role,
+          parts,
+          metadata,
+          parent_message_id: assistant.parent_message_id,
+          rating: 0,
+          created_at: new Date().toISOString(),
+        });
+      } else {
+        const { error } = await supabase.from('messages').insert({
+          id: newId,
+          conversation_id: conversation.id,
+          role,
+          parts,
+          metadata,
+          parent_message_id: assistant.parent_message_id,
+          rating: 0,
+        });
+        if (error) throw error;
+      }
 
       // Mirror the trigger's leaf advance + add the copy to the messages
       // cache optimistically so the new branch resolves before refetch.

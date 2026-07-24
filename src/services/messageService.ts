@@ -3,6 +3,11 @@ import { supabase } from '@/lib/supabase';
 import type { AppUIMessage } from '@shared/chatAi';
 import type { Conversation, Message } from '@shared/types';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import {
+  isLocalMode,
+  listLocalMessages,
+  saveLocalMessage,
+} from '@/lib/localMode';
 
 /**
  * Insert a new user message into the conversation. The `update_leaf_trigger`
@@ -28,6 +33,19 @@ export async function persistUserMessage({
   parentMessageId: string | null;
 }): Promise<string> {
   const id = crypto.randomUUID();
+  if (isLocalMode) {
+    saveLocalMessage(conversationId, {
+      id,
+      conversation_id: conversationId,
+      role: 'user',
+      parts,
+      metadata: metadata ?? {},
+      parent_message_id: parentMessageId,
+      rating: 0,
+      created_at: new Date().toISOString(),
+    });
+    return id;
+  }
   const { error } = await supabase.from('messages').insert({
     id,
     conversation_id: conversationId,
@@ -78,6 +96,19 @@ export async function persistAssistantParts({
       ? { metadata: JSON.parse(JSON.stringify(metadata)) }
       : {}),
   };
+  if (isLocalMode) {
+    const existing = listLocalMessages(conversationId).find(
+      (message) => message.id === messageId,
+    );
+    if (existing) {
+      saveLocalMessage(conversationId, {
+        ...existing,
+        parts,
+        ...(metadata !== undefined ? { metadata } : {}),
+      });
+    }
+    return;
+  }
 
   // A matched-nothing update is silent in PostgREST. The usual cause is benign
   // and self-healing: the client resolved a tool call before the server's
@@ -116,6 +147,7 @@ export const useMessagesQuery = () => {
     queryKey: ['messages', conversation.id],
     initialData: [],
     queryFn: async () => {
+      if (isLocalMode) return listLocalMessages(conversation.id);
       const { data, error } = await supabase
         .from('messages')
         .select('*')
@@ -154,6 +186,13 @@ export function useChangeRatingMutation({
         (oldMessages) =>
           oldMessages?.map((m) => (m.id === messageId ? { ...m, rating } : m)),
       );
+      if (isLocalMode) {
+        const existing = listLocalMessages(conversationId).find(
+          (message) => message.id === messageId,
+        );
+        if (existing) saveLocalMessage(conversationId, { ...existing, rating });
+        return;
+      }
       const { error } = await supabase
         .from('messages')
         .update({ rating })

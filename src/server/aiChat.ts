@@ -1,5 +1,6 @@
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
+import { createOpenAI } from '@ai-sdk/openai';
 import { createOpenRouter } from '@openrouter/ai-sdk-provider';
 import { chatTools, type AppUIMessage, type AppTools } from '@shared/chatAi';
 import { cleanAssistantText, getParametricText } from '@shared/parametricParts';
@@ -300,6 +301,8 @@ type ChatBody = {
   conversationId: string;
   model: Model;
   thinking?: boolean;
+  conversationType?: 'parametric' | 'creative';
+  messages?: AppUIMessage[];
 };
 
 type ConversationAccess = Pick<
@@ -312,6 +315,10 @@ function isChatBody(value: unknown): value is ChatBody {
     isRecord(value) &&
     typeof value.conversationId === 'string' &&
     typeof value.model === 'string' &&
+    (value.conversationType == null ||
+      value.conversationType === 'parametric' ||
+      value.conversationType === 'creative') &&
+    (value.messages == null || Array.isArray(value.messages)) &&
     (value.thinking == null || typeof value.thinking === 'boolean')
   );
 }
@@ -354,12 +361,14 @@ function normalizedAnthropicBaseURL(): string | undefined {
 type ChatProviders = {
   anthropic: () => AnthropicProvider;
   google: () => GoogleProvider;
+  compatible: () => ReturnType<typeof createOpenAI>;
   openrouter: () => ReturnType<typeof createOpenRouter>;
 };
 
 function createChatProviders(): ChatProviders {
   let anthropic: AnthropicProvider | undefined;
   let google: GoogleProvider | undefined;
+  let compatible: ReturnType<typeof createOpenAI> | undefined;
   let openrouter: ReturnType<typeof createOpenRouter> | undefined;
   return {
     anthropic: () => {
@@ -377,6 +386,13 @@ function createChatProviders(): ChatProviders {
         apiKey: requiredEnv('GOOGLE_API_KEY'),
       });
       return google;
+    },
+    compatible: () => {
+      compatible ??= createOpenAI({
+        apiKey: requiredEnv('OPENAI_API_KEY'),
+        baseURL: requiredEnv('OPENAI_BASE_URL').replace(/\/+$/, ''),
+      });
+      return compatible;
     },
     openrouter: () => {
       openrouter ??= createOpenRouter({
@@ -405,11 +421,17 @@ function buildChatModel(
     thinking && thinkingBudget !== THINKING_BUDGET_TOKENS;
 
   if (providerFor(modelId) === 'openrouter') {
+    const compatibleBaseURL = env('OPENAI_BASE_URL').trim();
+    const compatibleModel = env('OPENAI_MODEL').trim();
     return {
-      model: providers.openrouter().chat(modelId, {
-        ...(thinking ? { reasoning: { max_tokens: thinkingBudget } } : {}),
-        usage: { include: true },
-      }),
+      model: compatibleBaseURL
+        ? providers
+            .compatible()
+            .chat(compatibleModel || modelId.replace(/^[^/]+\//, ''))
+        : providers.openrouter().chat(modelId, {
+            ...(thinking ? { reasoning: { max_tokens: thinkingBudget } } : {}),
+            usage: { include: true },
+          }),
     };
   }
 
@@ -984,41 +1006,58 @@ export async function handleAiChatRequest(req: Request) {
     return jsonResponse({ error: 'Method not allowed' }, 405);
   }
 
+  const localMode = env('LOCAL_MODE') === 'true';
   const supabaseClient = getAnonSupabaseClient({
     global: {
       headers: { Authorization: req.headers.get('Authorization') ?? '' },
     },
   });
-  const {
-    data: { user },
-  } = await supabaseClient.auth.getUser();
-
-  if (!user?.id || !user.email) {
-    return jsonResponse({ error: 'Unauthorized' }, 401);
-  }
-
   const rawBody = await req.json().catch(() => null);
   if (!isChatBody(rawBody)) {
     return jsonResponse({ error: 'Invalid request body' }, 400);
   }
 
-  const { data: conversation, error: conversationError } = await supabaseClient
-    .from('conversations')
-    .select('id, type, user_id, current_message_leaf_id')
-    .eq('id', rawBody.conversationId)
-    .eq('user_id', user.id)
-    .single()
-    .overrideTypes<ConversationAccess>();
+  const user = localMode
+    ? {
+        id: '00000000-0000-4000-8000-000000000001',
+        email: 'admin@local.cadam',
+      }
+    : (await supabaseClient.auth.getUser()).data.user;
 
-  if (conversationError || !conversation) {
-    return jsonResponse({ error: 'Conversation not found' }, 404);
+  if (!user?.id || !user.email) {
+    return jsonResponse({ error: 'Unauthorized' }, 401);
   }
 
-  if (!conversation.current_message_leaf_id) {
-    return jsonResponse(
-      { error: 'Conversation has no leaf to generate from' },
-      400,
-    );
+  let conversation: ConversationAccess;
+  if (localMode) {
+    const localMessages = rawBody.messages ?? [];
+    conversation = {
+      id: rawBody.conversationId,
+      type: rawBody.conversationType ?? 'parametric',
+      user_id: user.id,
+      current_message_leaf_id: localMessages.at(-1)?.id ?? null,
+    };
+    if (localMessages.length === 0) {
+      return jsonResponse({ error: 'Conversation has no messages' }, 400);
+    }
+  } else {
+    const { data, error } = await supabaseClient
+      .from('conversations')
+      .select('id, type, user_id, current_message_leaf_id')
+      .eq('id', rawBody.conversationId)
+      .eq('user_id', user.id)
+      .single()
+      .overrideTypes<ConversationAccess>();
+    if (error || !data) {
+      return jsonResponse({ error: 'Conversation not found' }, 404);
+    }
+    conversation = data;
+    if (!conversation.current_message_leaf_id) {
+      return jsonResponse(
+        { error: 'Conversation has no leaf to generate from' },
+        400,
+      );
+    }
   }
 
   // Pre-flight balance gate. A chat costs at least 1 billing token, so a
@@ -1026,29 +1065,30 @@ export async function handleAiChatRequest(req: Request) {
   // estimate the exact cost up front — chat is variable, and the billing
   // service drains the remainder to zero if the actual usage exceeds
   // what's left (see onFinish below).
-  try {
-    const status = await billing.getStatus(user.email);
-    if (status.tokens.total <= 0) {
-      return jsonResponse(
-        {
-          error: 'insufficient_tokens',
-          code: 'insufficient_tokens',
-          tokensRequired: 1,
-          tokensAvailable: 0,
-        },
-        402,
-      );
+  if (!localMode)
+    try {
+      const status = await billing.getStatus(user.email);
+      if (status.tokens.total <= 0) {
+        return jsonResponse(
+          {
+            error: 'insufficient_tokens',
+            code: 'insufficient_tokens',
+            tokensRequired: 1,
+            tokensAvailable: 0,
+          },
+          402,
+        );
+      }
+    } catch (error) {
+      logError(error, {
+        functionName: 'ai-chat',
+        statusCode: error instanceof BillingClientError ? error.status : 502,
+        userId: user.id,
+        conversationId: conversation.id,
+        additionalContext: { operation: 'billing_preflight' },
+      });
+      return jsonResponse({ error: 'Billing service unavailable' }, 503);
     }
-  } catch (error) {
-    logError(error, {
-      functionName: 'ai-chat',
-      statusCode: error instanceof BillingClientError ? error.status : 502,
-      userId: user.id,
-      conversationId: conversation.id,
-      additionalContext: { operation: 'billing_preflight' },
-    });
-    return jsonResponse({ error: 'Billing service unavailable' }, 503);
-  }
 
   const tools =
     conversation.type === 'creative'
@@ -1061,26 +1101,32 @@ export async function handleAiChatRequest(req: Request) {
 
   let branchMessages: AppUIMessage[];
   let leafRole: 'user' | 'assistant';
-  try {
-    const branchResult = await loadBranchFromDb({
-      supabaseClient,
-      conversationId: conversation.id,
-      leafId: conversation.current_message_leaf_id,
-    });
-    branchMessages = branchResult.branch;
-    leafRole = branchResult.leafRole;
-  } catch (error) {
-    logError(error, {
-      functionName: 'ai-chat',
-      statusCode: 500,
-      userId: user.id,
-      conversationId: conversation.id,
-      additionalContext: { operation: 'load_branch' },
-    });
-    return jsonResponse({ error: 'Failed to load conversation branch' }, 500);
-  }
+  if (localMode) {
+    branchMessages = rawBody.messages ?? [];
+    leafRole =
+      branchMessages.at(-1)?.role === 'assistant' ? 'assistant' : 'user';
+  } else
+    try {
+      const branchResult = await loadBranchFromDb({
+        supabaseClient,
+        conversationId: conversation.id,
+        leafId: conversation.current_message_leaf_id!,
+      });
+      branchMessages = branchResult.branch;
+      leafRole = branchResult.leafRole;
+    } catch (error) {
+      logError(error, {
+        functionName: 'ai-chat',
+        statusCode: 500,
+        userId: user.id,
+        conversationId: conversation.id,
+        additionalContext: { operation: 'load_branch' },
+      });
+      return jsonResponse({ error: 'Failed to load conversation branch' }, 500);
+    }
 
-  const leafMessageId = conversation.current_message_leaf_id;
+  const leafMessageId =
+    conversation.current_message_leaf_id ?? branchMessages.at(-1)!.id;
 
   // Provider instances are lazy so a missing key only fails the selected
   // provider. Keep this guarded anyway so setup errors return a clear 503.
@@ -1390,7 +1436,7 @@ export async function handleAiChatRequest(req: Request) {
     execute: async ({ writer }) => {
       // Title (first user turn only) runs in parallel with the model
       // stream — fire-and-forget; the assistant doesn't wait on it.
-      if (isFirstUserTurn && env('ANTHROPIC_API_KEY')) {
+      if (!localMode && isFirstUserTurn && env('ANTHROPIC_API_KEY')) {
         void emitConversationTitle({
           writer,
           anthropic: providers.anthropic(),
@@ -1424,6 +1470,10 @@ export async function handleAiChatRequest(req: Request) {
               metadata: JSON.parse(JSON.stringify(metadata)),
               parts: JSON.parse(JSON.stringify(finalizedParts)),
             };
+
+            // In local mode the browser owns persistence in localStorage and
+            // sends the complete message branch with the next request.
+            if (localMode) return;
 
             // Does this turn end awaiting a CLIENT-side tool result? Our
             // parametric tools (`build_parametric_model`, `answer_user`) have

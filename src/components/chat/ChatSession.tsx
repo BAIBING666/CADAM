@@ -13,6 +13,11 @@ import { collectStuckToolRecovery } from '@/components/chat/stuckToolRecovery';
 import { AssistantRowMissingError } from '@/services/messageService';
 import { supabase } from '@/lib/supabase';
 import {
+  isLocalMode,
+  saveLocalUiMessage,
+  updateLocalConversation,
+} from '@/lib/localMode';
+import {
   generateColoredPreview,
   generateInspectionPreview,
   generatePreview,
@@ -167,6 +172,7 @@ export function ChatSession({
   // in the DB, so anything the SDK might put in `messages` is ignored.
   // ───────────────────────────────────────────────────────────────────────
   const authHeaders = useCallback(async (): Promise<Record<string, string>> => {
+    if (isLocalMode) return { Authorization: 'Bearer local-session' };
     const token = (await supabase.auth.getSession()).data.session?.access_token;
     return token ? { Authorization: `Bearer ${token}` } : {};
   }, []);
@@ -211,10 +217,12 @@ export function ChatSession({
         ),
         headers: authHeaders,
         fetch: billingAwareFetch,
-        prepareSendMessagesRequest: ({ body }) => ({
+        prepareSendMessagesRequest: ({ body, messages }) => ({
           body: {
             conversationId: conversation.id,
             model,
+            conversationType: conversation.type,
+            ...(isLocalMode ? { messages } : {}),
             ...(body ?? {}),
           },
         }),
@@ -631,6 +639,17 @@ export function ChatSession({
       }
     },
     onFinish: ({ message }) => {
+      if (isLocalMode && message?.id) {
+        const previous = messagesRef.current.at(-1);
+        saveLocalUiMessage(
+          conversation.id,
+          message,
+          previous && previous.id !== message.id ? previous.id : null,
+        );
+        updateLocalConversation(conversation.id, {
+          current_message_leaf_id: message.id,
+        });
+      }
       // The DB trigger has already advanced `current_message_leaf_id` to
       // the new assistant. Push that into the conversation cache
       // optimistically so the UI doesn't flicker; the invalidation right

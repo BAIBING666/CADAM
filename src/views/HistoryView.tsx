@@ -21,6 +21,13 @@ import { ConversationCard } from '@/components/history/ConversationCard';
 import { VisualCard } from '@/components/history/VisualCard';
 import { RenameDialogDrawer } from '@/components/history/RenameDialogDrawer';
 import { cn } from '@/lib/utils';
+import {
+  deleteLocalConversation,
+  isLocalMode,
+  listLocalConversations,
+  listLocalMessages,
+  updateLocalConversation,
+} from '@/lib/localMode';
 
 const VIEW_TRANSITION_PROPS = {
   initial: { opacity: 0, y: 10, filter: 'blur(2px)' },
@@ -60,6 +67,24 @@ export function HistoryView() {
     queryKey: ['conversations'],
     enabled: !!user,
     queryFn: async () => {
+      if (isLocalMode) {
+        return listLocalConversations()
+          .sort((a, b) =>
+            (b.updated_at ?? '').localeCompare(a.updated_at ?? ''),
+          )
+          .map((conversation) => {
+            const messages = listLocalMessages(conversation.id);
+            const first = messages[0];
+            return {
+              ...conversation,
+              message_count: messages.length,
+              first_message: {
+                text: textFromParts(first?.parts),
+                images: imageIdsFromParts(first?.parts),
+              },
+            } as HistoryConversation;
+          });
+      }
       const { data: conversationsData, error: conversationsError } =
         await supabase
           .from('conversations')
@@ -109,6 +134,10 @@ export function HistoryView() {
 
   const deleteConversation = useMutation({
     mutationFn: async (conversationId: string) => {
+      if (isLocalMode) {
+        deleteLocalConversation(conversationId);
+        return;
+      }
       const { error } = await supabase
         .from('conversations')
         .delete()
@@ -167,6 +196,10 @@ export function HistoryView() {
       conversationId: string;
       newTitle: string;
     }) => {
+      if (isLocalMode) {
+        updateLocalConversation(conversationId, { title: newTitle });
+        return;
+      }
       const { error } = await supabase
         .from('conversations')
         .update({ title: newTitle })
@@ -217,6 +250,10 @@ export function HistoryView() {
       conversationId: string;
       newPrivacy: 'public' | 'private';
     }) => {
+      if (isLocalMode) {
+        updateLocalConversation(conversationId, { privacy: newPrivacy });
+        return;
+      }
       const { error } = await supabase
         .from('conversations')
         .update({ privacy: newPrivacy })

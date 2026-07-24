@@ -29,8 +29,6 @@ import {
 import { useIsMobile } from '@/hooks/useIsMobile';
 import { useQuery } from '@tanstack/react-query';
 import { ConditionalWrapper } from './ConditionalWrapper';
-import { DiscordIcon, GitHubIcon } from './icons/CompanyIcons';
-import { cn } from '@/lib/utils';
 import { Conversation, ConversationSettings } from '@shared/types';
 import { UserAvatar } from '@/components/chat/UserAvatar';
 import { useProfile } from '@/services/profileService';
@@ -276,93 +274,9 @@ function DesktopSidebar({ isSidebarOpen, setIsSidebarOpen }: SidebarProps) {
         <div
           className={`${isSidebarOpen ? 'px-4' : 'px-2'} py-4 transition-all duration-300 ease-in-out dark:border-gray-800`}
         >
-          <div className={cn('flex flex-col gap-2', isSidebarOpen && 'gap-3')}>
-            {/* GitHub Button - Collapsed state */}
-            {!isSidebarOpen && (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <a
-                    href="https://github.com/Adam-CAD/CADAM"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    <Button
-                      variant="adam_dark_collapsed"
-                      className="mb-0 ml-[1px] h-[46px] w-[46px] p-0"
-                    >
-                      <GitHubIcon className="h-[22px] w-[22px]" />
-                    </Button>
-                  </a>
-                </TooltipTrigger>
-                <TooltipContent side="right" className="flex flex-col">
-                  <span className="font-semibold">GitHub</span>
-                  <span className="text-xs text-muted-foreground">
-                    View source code
-                  </span>
-                </TooltipContent>
-              </Tooltip>
-            )}
-
-            {/* GitHub Button - Expanded state */}
-            {isSidebarOpen && (
-              <a
-                href="https://github.com/Adam-CAD/CADAM"
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                <Button
-                  variant="adam_dark"
-                  className="flex h-10 w-full items-center justify-start gap-2"
-                >
-                  <GitHubIcon className="h-[22px] w-[22px] min-w-[22px]" />
-                  GitHub
-                </Button>
-              </a>
-            )}
-
-            {/* Discord Button - Collapsed state */}
-            {!isSidebarOpen && (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <a
-                    href="https://discord.com/invite/HKdXDqAHCs"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    <Button
-                      variant="adam_dark_collapsed"
-                      className="mb-0 ml-[1px] h-[46px] w-[46px] p-0"
-                    >
-                      <DiscordIcon className="h-[22px] w-[22px]" />
-                    </Button>
-                  </a>
-                </TooltipTrigger>
-                <TooltipContent side="right" className="flex flex-col">
-                  <span className="font-semibold">Discord</span>
-                  <span className="text-xs text-muted-foreground">
-                    Join our community
-                  </span>
-                </TooltipContent>
-              </Tooltip>
-            )}
-
-            {/* Discord Button - Expanded state */}
-            {isSidebarOpen && (
-              <a
-                href="https://discord.com/invite/HKdXDqAHCs"
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                <Button
-                  variant="adam_dark"
-                  className="flex h-10 w-full items-center justify-start gap-2"
-                >
-                  <DiscordIcon className="h-[22px] w-[22px] min-w-[22px]" />
-                  Discord
-                </Button>
-              </a>
-            )}
-
+          <div
+            className={`flex flex-col gap-2 ${isSidebarOpen ? 'gap-3' : ''}`}
+          >
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 {renderUserSectionTrigger()}

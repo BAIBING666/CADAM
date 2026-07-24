@@ -7,6 +7,12 @@ import posthog from 'posthog-js';
 import { AuthContext, type BillingStatus, getLevel } from './AuthContext';
 import { apiJson } from '@/services/api';
 import { z } from 'zod';
+import {
+  isLocalMode,
+  LOCAL_SESSION_KEY,
+  LOCAL_USER_EMAIL,
+  LOCAL_USER_ID,
+} from '@/lib/localMode';
 
 // Build an absolute, same-frontend redirect URL for Supabase auth emails / OAuth.
 // Uses the current origin + Vite base path so links return to whichever frontend
@@ -80,6 +86,31 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   // Initialize auth state and set up session listener
   useEffect(() => {
+    if (isLocalMode) {
+      const authenticated = localStorage.getItem(LOCAL_SESSION_KEY) === 'true';
+      if (authenticated) {
+        const localUser = {
+          id: LOCAL_USER_ID,
+          email: LOCAL_USER_EMAIL,
+          user_metadata: { full_name: 'Administrator', account: 'admin' },
+          app_metadata: { provider: 'local' },
+          aud: 'authenticated',
+          created_at: new Date(0).toISOString(),
+        } as User;
+        setUser(localUser);
+        setSession({
+          access_token: 'local-session',
+          refresh_token: 'local-session',
+          expires_in: 315360000,
+          expires_at: Math.floor(Date.now() / 1000) + 315360000,
+          token_type: 'bearer',
+          user: localUser,
+        });
+      }
+      setIsLoading(false);
+      return;
+    }
+
     const initializeAuth = async () => {
       try {
         const {
@@ -114,7 +145,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // truth; no local realtime channel anymore.
   const { data: billing, isLoading: isBillingLoading } = useQuery({
     queryKey: ['billing', 'status'],
-    enabled: !!user,
+    enabled: !!user && !isLocalMode,
     refetchInterval: 30000,
     queryFn: async (): Promise<BillingStatus> => {
       try {
@@ -139,7 +170,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (error) throw error;
       return data;
     },
-    enabled: !!user?.id,
+    enabled: !!user?.id && !isLocalMode,
   });
 
   // Initialize notifications preference once on first render after profile loads
@@ -225,7 +256,39 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, [user, isBillingLoading, billing, profile, isProfileLoading]);
 
-  const signIn = async (email: string, password: string) => {
+  const signIn = async (account: string, password: string) => {
+    if (isLocalMode) {
+      const expectedAccount = import.meta.env.VITE_LOCAL_ACCOUNT || 'admin';
+      const expectedPassword =
+        import.meta.env.VITE_LOCAL_PASSWORD || 'admin123';
+      if (account.trim() !== expectedAccount || password !== expectedPassword) {
+        throw new Error('Invalid login credentials');
+      }
+      const localUser = {
+        id: LOCAL_USER_ID,
+        email: LOCAL_USER_EMAIL,
+        user_metadata: { full_name: 'Administrator', account },
+        app_metadata: { provider: 'local' },
+        aud: 'authenticated',
+        created_at: new Date(0).toISOString(),
+      } as User;
+      const localSession = {
+        access_token: 'local-session',
+        refresh_token: 'local-session',
+        expires_in: 315360000,
+        expires_at: Math.floor(Date.now() / 1000) + 315360000,
+        token_type: 'bearer',
+        user: localUser,
+      } as Session;
+      localStorage.setItem(LOCAL_SESSION_KEY, 'true');
+      setUser(localUser);
+      setSession(localSession);
+      return;
+    }
+    const normalizedAccount = account.trim().toLowerCase();
+    const email = normalizedAccount.includes('@')
+      ? normalizedAccount
+      : `${normalizedAccount}@local.cadam`;
     const { error } = await supabase.auth.signInWithPassword({
       email,
       password,
@@ -246,6 +309,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const signOut = async () => {
+    if (isLocalMode) {
+      localStorage.removeItem(LOCAL_SESSION_KEY);
+      setSession(null);
+      setUser(null);
+      return;
+    }
     const { error } = await supabase.auth.signOut();
     if (error) throw error;
   };
@@ -287,9 +356,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       value={{
         session,
         user,
-        billing: billing ?? null,
+        billing: isLocalMode ? LOCAL_BILLING_STATUS : (billing ?? null),
         isLoading:
-          isLoading || (!!user && (isBillingLoading || isProfileLoading)),
+          isLoading ||
+          (!isLocalMode && !!user && (isBillingLoading || isProfileLoading)),
         signIn,
         signUp,
         signInWithMagicLink,

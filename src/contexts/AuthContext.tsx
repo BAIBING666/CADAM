@@ -34,7 +34,7 @@ interface AuthContextType {
   user: User | null;
   billing: BillingStatus | null;
   isLoading: boolean;
-  signIn: (email: string, password: string) => Promise<void>;
+  signIn: (account: string, password: string) => Promise<void>;
   signUp: (email: string, password: string, name: string) => Promise<void>;
   signOut: () => Promise<void>;
   signInWithMagicLink: (email: string) => Promise<void>;

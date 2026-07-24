@@ -30,6 +30,11 @@ import { createAndCacheAiChat } from '@/hooks/useCachedAiChat';
 import type { AppUIMessage } from '@shared/chatAi';
 import { ensureInputRecords } from '@/lib/aiMessages';
 import { persistUserMessage } from '@/services/messageService';
+import {
+  createLocalConversation,
+  isLocalMode,
+  updateLocalConversation,
+} from '@/lib/localMode';
 
 export function PromptView() {
   const navigate = useNavigate();
@@ -51,7 +56,7 @@ export function PromptView() {
 
   const [type, setType] = useState<'parametric' | 'creative'>('parametric');
 
-  const [model, setModel] = useState<Model>('openai/gpt-5.6-sol');
+  const [model, setModel] = useState<Model>('z-ai/glm-5.2');
 
   const handleTypeChange = (newType: 'parametric' | 'creative') => {
     setType(newType);
@@ -59,7 +64,7 @@ export function PromptView() {
     if (newType === 'creative') {
       setModel('quality');
     } else {
-      setModel('openai/gpt-5.6-sol');
+      setModel('z-ai/glm-5.2');
     }
   };
 
@@ -145,29 +150,39 @@ export function PromptView() {
       });
 
       // Create conversation immediately with 'New Conversation'
-      const { data: conversation, error: conversationError } = await supabase
-        .from('conversations')
-        .insert([
-          {
+      const localTitle = text.trim().slice(0, 48) || 'New Conversation';
+      const conversation = isLocalMode
+        ? createLocalConversation({
             id: conversationId,
-            user_id: user.id,
-            title: 'New Conversation',
-            type: type,
-            settings: {
-              model: model,
-            },
-          },
-        ])
-        .select()
-        .single();
+            type,
+            model,
+            title: localTitle,
+          })
+        : await (async () => {
+            const { data, error } = await supabase
+              .from('conversations')
+              .insert([
+                {
+                  id: conversationId,
+                  user_id: user.id,
+                  title: 'New Conversation',
+                  type,
+                  settings: { model },
+                },
+              ])
+              .select()
+              .single();
+            if (error) throw error;
+            return data;
+          })();
 
-      if (conversationError) throw conversationError;
-
-      await ensureInputRecords({
-        parts,
-        conversationId: conversation.id,
-        userId: user.id,
-      });
+      if (!isLocalMode) {
+        await ensureInputRecords({
+          parts,
+          conversationId: conversation.id,
+          userId: user.id,
+        });
+      }
       if (parts.length === 0) throw new Error('No message parts to send');
 
       // Persist the user message before kicking off the chat. The
@@ -197,10 +212,12 @@ export function PromptView() {
             if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
             return headers;
           },
-          prepareSendMessagesRequest: ({ body }) => ({
+          prepareSendMessagesRequest: ({ body, messages }) => ({
             body: {
               conversationId: conversation.id,
               model,
+              conversationType: type,
+              ...(isLocalMode ? { messages } : {}),
               ...(body ?? {}),
             },
           }),
@@ -217,6 +234,12 @@ export function PromptView() {
             },
           });
         });
+
+      if (isLocalMode) {
+        updateLocalConversation(conversation.id, {
+          current_message_leaf_id: userMessageId,
+        });
+      }
 
       return {
         conversationId: conversation.id,
